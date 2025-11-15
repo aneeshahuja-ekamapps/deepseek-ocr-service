@@ -1,0 +1,186 @@
+name: Deploy to AWS EC2
+
+on:
+  workflow_run:
+    workflows: ["Build and Push Docker Image"]
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:  # Allow manual deployment
+    inputs:
+      instance_id:
+        description: 'EC2 Instance ID to deploy to'
+        required: true
+        type: string
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        type: choice
+        options:
+          - production
+          - staging
+          - development
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: deepseek-ocr-service
+
+jobs:
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    # Only run if the docker build was successful or manually triggered
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Get instance ID
+        id: get-instance
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "instance_id=${{ github.event.inputs.instance_id }}" >> $GITHUB_OUTPUT
+          else
+            # Get instance ID from tag or environment variable
+            INSTANCE_ID="${{ secrets.EC2_INSTANCE_ID }}"
+            echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy to EC2
+        env:
+          INSTANCE_ID: ${{ steps.get-instance.outputs.instance_id }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Create deployment script
+          cat > deploy.sh << 'DEPLOY_SCRIPT'
+          #!/bin/bash
+          set -e
+
+          echo "🚀 Starting deployment..."
+
+          # Login to ECR
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+          # Pull latest image
+          echo "📥 Pulling latest image..."
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG || docker pull $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          # Stop and remove old container
+          echo "🛑 Stopping old container..."
+          docker-compose -f /opt/deepseek-ocr-service/docker-compose.yml down || true
+
+          # Update docker-compose to use ECR image
+          cd /opt/deepseek-ocr-service
+          sed -i "s|build:.*|image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG|" docker-compose.yml
+          sed -i "/dockerfile:/d" docker-compose.yml
+          sed -i "/context:/d" docker-compose.yml
+
+          # Start new container
+          echo "🚀 Starting new container..."
+          docker-compose up -d
+
+          # Wait for health check
+          echo "⏳ Waiting for service to be healthy..."
+          for i in {1..30}; do
+            if curl -f http://localhost:8000/health > /dev/null 2>&1; then
+              echo "✅ Service is healthy!"
+              exit 0
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 10
+          done
+
+          echo "❌ Service failed to start"
+          docker-compose logs --tail=50
+          exit 1
+          DEPLOY_SCRIPT
+
+          # Upload deployment script to EC2
+          aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands="$(cat deploy.sh)" \
+            --output text \
+            --query "Command.CommandId" > command_id.txt
+
+          # Wait for command to complete
+          COMMAND_ID=$(cat command_id.txt)
+          echo "Command ID: $COMMAND_ID"
+
+          for i in {1..60}; do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query "Status" \
+              --output text)
+
+            echo "Deployment status: $STATUS"
+
+            if [ "$STATUS" == "Success" ]; then
+              echo "✅ Deployment successful!"
+              aws ssm get-command-invocation \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$INSTANCE_ID" \
+                --query "StandardOutputContent" \
+                --output text
+              exit 0
+            elif [ "$STATUS" == "Failed" ] || [ "$STATUS" == "Cancelled" ]; then
+              echo "❌ Deployment failed!"
+              aws ssm get-command-invocation \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$INSTANCE_ID" \
+                --query "StandardErrorContent" \
+                --output text
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          echo "❌ Deployment timeout"
+          exit 1
+
+      - name: Verify deployment
+        env:
+          INSTANCE_ID: ${{ steps.get-instance.outputs.instance_id }}
+        run: |
+          # Get instance public IP
+          PUBLIC_IP=$(aws ec2 describe-instances \
+            --instance-ids "$INSTANCE_ID" \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+
+          echo "Instance IP: $PUBLIC_IP"
+
+          # Test health endpoint
+          sleep 10
+          if curl -f "http://$PUBLIC_IP/health"; then
+            echo "✅ Service is accessible"
+          else
+            echo "❌ Service is not accessible"
+            exit 1
+          fi
+
+      - name: Create deployment summary
+        if: always()
+        run: |
+          echo "## Deployment Summary :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: ${{ github.event.inputs.environment || 'production' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Instance ID**: ${{ steps.get-instance.outputs.instance_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image Tag**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

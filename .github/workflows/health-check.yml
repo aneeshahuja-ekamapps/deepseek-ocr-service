@@ -1,0 +1,110 @@
+name: Health Check
+
+on:
+  schedule:
+    # Run every hour
+    - cron: '0 * * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  health-check:
+    name: Check Service Health
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get instance details
+        id: instance
+        env:
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+        run: |
+          # Get instance state
+          STATE=$(aws ec2 describe-instances \
+            --instance-ids "$INSTANCE_ID" \
+            --query 'Reservations[0].Instances[0].State.Name' \
+            --output text)
+
+          echo "Instance state: $STATE"
+          echo "state=$STATE" >> $GITHUB_OUTPUT
+
+          if [ "$STATE" == "running" ]; then
+            # Get public IP
+            PUBLIC_IP=$(aws ec2 describe-instances \
+              --instance-ids "$INSTANCE_ID" \
+              --query 'Reservations[0].Instances[0].PublicIpAddress' \
+              --output text)
+
+            echo "Public IP: $PUBLIC_IP"
+            echo "public_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check service health
+        if: steps.instance.outputs.state == 'running'
+        id: health
+        env:
+          PUBLIC_IP: ${{ steps.instance.outputs.public_ip }}
+        run: |
+          # Test health endpoint
+          RESPONSE=$(curl -s -w "\n%{http_code}" "http://$PUBLIC_IP/health" || echo "000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n 1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "HTTP Code: $HTTP_CODE"
+          echo "Response: $BODY"
+
+          if [ "$HTTP_CODE" == "200" ]; then
+            echo "status=healthy" >> $GITHUB_OUTPUT
+
+            # Parse JSON response
+            MODEL_LOADED=$(echo "$BODY" | jq -r '.model_loaded')
+            GPU_AVAILABLE=$(echo "$BODY" | jq -r '.gpu_available')
+            GPU_NAME=$(echo "$BODY" | jq -r '.gpu_name')
+
+            echo "model_loaded=$MODEL_LOADED" >> $GITHUB_OUTPUT
+            echo "gpu_available=$GPU_AVAILABLE" >> $GITHUB_OUTPUT
+            echo "gpu_name=$GPU_NAME" >> $GITHUB_OUTPUT
+          else
+            echo "status=unhealthy" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Test OCR functionality
+        if: steps.health.outputs.status == 'healthy'
+        env:
+          PUBLIC_IP: ${{ steps.instance.outputs.public_ip }}
+        run: |
+          # Create a simple test image
+          echo "Testing OCR functionality..."
+
+          # You can add actual OCR test here if needed
+          echo "✅ Basic health check passed"
+
+      - name: Report status
+        if: always()
+        run: |
+          echo "## Health Check Report :medical_symbol:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Instance State**: ${{ steps.instance.outputs.state }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Public IP**: ${{ steps.instance.outputs.public_ip || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service Status**: ${{ steps.health.outputs.status || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Model Loaded**: ${{ steps.health.outputs.model_loaded || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **GPU Available**: ${{ steps.health.outputs.gpu_available || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **GPU Name**: ${{ steps.health.outputs.gpu_name || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Send notification on failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: 'DeepSeek-OCR service health check failed!'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  deepseek-ocr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: deepseek-ocr-service
+    restart: unless-stopped
+
+    # GPU support
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    # Environment variables
+    environment:
+      - REQUIRE_API_KEY=true
+      - API_KEY=${API_KEY:-your-secret-api-key-change-this}
+      - CUDA_VISIBLE_DEVICES=0
+
+    # Ports
+    ports:
+      - "8000:8000"
+
+    # Volumes for model cache (speeds up restarts)
+    volumes:
+      - huggingface-cache:/root/.cache/huggingface
+      - ./logs:/app/logs
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  nginx:
+    image: nginx:alpine
+    container_name: deepseek-ocr-nginx
+    restart: unless-stopped
+
+    ports:
+      - "80:80"
+      - "443:443"
+
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro  # Mount SSL certificates here if using HTTPS
+
+    depends_on:
+      - deepseek-ocr
+
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  huggingface-cache:
+    driver: local

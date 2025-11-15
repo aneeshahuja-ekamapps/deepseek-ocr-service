@@ -1,0 +1,112 @@
+name: Create Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., v1.0.0)'
+        required: true
+        type: string
+
+jobs:
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Get all history for changelog
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get commits since last tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -z "$PREV_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          else
+            COMMITS=$(git log $PREV_TAG..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          fi
+
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMITS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Build release artifacts
+        run: |
+          # Create deployment package
+          mkdir -p release
+          cp -r aws release/
+          cp docker-compose.yml release/
+          cp Dockerfile release/
+          cp requirements.txt release/
+          cp README.md release/
+          cp QUICKSTART.md release/
+          cp RESOLUTION_GUIDE.md release/
+          cp .env.example release/
+
+          # Create tarball
+          tar -czf deepseek-ocr-service-${{ steps.version.outputs.version }}.tar.gz -C release .
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: DeepSeek-OCR Service ${{ steps.version.outputs.version }}
+          body: |
+            ## DeepSeek-OCR Service ${{ steps.version.outputs.version }}
+
+            ### What's Changed
+            ${{ steps.changelog.outputs.changelog }}
+
+            ### Installation
+
+            ```bash
+            # Download and extract
+            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/deepseek-ocr-service-${{ steps.version.outputs.version }}.tar.gz
+            tar -xzf deepseek-ocr-service-${{ steps.version.outputs.version }}.tar.gz
+
+            # Deploy to AWS
+            cd aws
+            chmod +x deploy-ec2.sh
+            ./deploy-ec2.sh
+            ```
+
+            ### Docker Image
+
+            ```bash
+            # Pull from ECR (if configured)
+            docker pull ${{ secrets.ECR_REGISTRY }}/deepseek-ocr-service:${{ steps.version.outputs.version }}
+
+            # Or build locally
+            docker build -t deepseek-ocr-service:${{ steps.version.outputs.version }} .
+            ```
+
+            ### Documentation
+            - [README](https://github.com/${{ github.repository }}/blob/${{ steps.version.outputs.version }}/README.md)
+            - [Quick Start Guide](https://github.com/${{ github.repository }}/blob/${{ steps.version.outputs.version }}/QUICKSTART.md)
+            - [Resolution Guide](https://github.com/${{ github.repository }}/blob/${{ steps.version.outputs.version }}/RESOLUTION_GUIDE.md)
+
+            **Full Changelog**: https://github.com/${{ github.repository }}/compare/${{ steps.version.outputs.version }}
+          files: |
+            deepseek-ocr-service-${{ steps.version.outputs.version }}.tar.gz
+          draft: false
+          prerelease: false
+          token: ${{ secrets.GITHUB_TOKEN }}

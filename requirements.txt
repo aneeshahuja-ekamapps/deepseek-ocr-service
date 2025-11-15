@@ -1,0 +1,23 @@
+# DeepSeek-OCR API Service Requirements
+
+# FastAPI & Server
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+python-multipart==0.0.12
+pydantic==2.9.2
+pydantic-settings==2.6.0
+
+# DeepSeek-OCR Core Dependencies
+torch==2.6.0
+transformers==4.49.0
+accelerate==1.2.0
+pillow==11.0.0
+
+# Flash Attention (for faster inference)
+flash-attn==2.7.3
+
+# Optional: vLLM for production (comment out if using transformers only)
+# vllm==0.8.5
+
+# Utilities
+python-dotenv==1.0.1
