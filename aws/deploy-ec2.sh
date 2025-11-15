@@ -19,7 +19,7 @@ echo "================================================"
 # Configuration
 INSTANCE_TYPE="g4dn.xlarge"  # NVIDIA T4, 16GB GPU
 AMI_ID=""  # Will be auto-detected for Deep Learning AMI
-REGION="us-east-1"
+REGION="ap-south-1"
 KEY_NAME=""
 SECURITY_GROUP_NAME="deepseek-ocr-sg"
 INSTANCE_NAME="deepseek-ocr-service"
@@ -34,7 +34,7 @@ fi
 # Prompt for configuration
 echo ""
 echo -e "${YELLOW}📋 Configuration${NC}"
-read -p "AWS Region [us-east-1]: " input_region
+read -p "AWS Region [ap-south-1]: " input_region
 REGION=${input_region:-$REGION}
 
 read -p "EC2 Key Pair Name (required): " KEY_NAME
